@@ -1,0 +1,45 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# AI Dental Implant Planning System — Requirements
+# OralSeg-compatible dependency set
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── Core framework ────────────────────────────────────────────────────────────
+streamlit>=1.35.0
+
+# ── Deep learning (CUDA 12.x build — change cu121 to cu118 for CUDA 11.8) ────
+# Install manually first:
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+torch>=2.1.0
+torchvision>=0.16.0
+
+# ── MONAI (must match OralSeg version) ───────────────────────────────────────
+monai==1.4.0
+
+# ── Mamba SSM (requires CUDA toolkit + nvcc to build from source on Windows) ──
+# Install manually if pip fails:
+#   pip install causal-conv1d==1.4.0 mamba-ssm==2.2.0
+mamba-ssm==2.2.0
+causal-conv1d==1.4.0
+
+# ── Medical imaging ───────────────────────────────────────────────────────────
+nibabel==5.3.2
+SimpleITK>=2.3.0
+pydicom>=2.4.0
+dicom2nifti>=2.4.0
+
+# ── Scientific computing ──────────────────────────────────────────────────────
+numpy==1.26.4
+scipy>=1.11.0
+
+# ── Visualization ─────────────────────────────────────────────────────────────
+matplotlib>=3.8.0
+plotly>=5.18.0
+
+# ── Utilities ─────────────────────────────────────────────────────────────────
+einops==0.8.1
+tensorboardX>=2.6.0
+tqdm>=4.66.0
+
+# ── Optional (for 3D rendering) ───────────────────────────────────────────────
+# vtk>=9.3.0
+# pyvista>=0.43.0

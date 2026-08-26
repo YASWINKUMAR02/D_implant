@@ -1,0 +1,84 @@
+# ==============================================================================
+# .gitignore — AI Dental Implant Workstation
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# 1. DATASETS & RAW SCAN DATA (DO NOT PUSH TO GITHUB)
+# ------------------------------------------------------------------------------
+Panoramic_Dental_Xray_Segmentation_Dataset/
+teeth detection and numbering.v18i.yolov7pytorch/
+New folder/
+dataset/
+datasets/
+data/
+raw_data/
+scans/
+
+# Temporary user upload and conversion folders
+uploads/
+converted/
+runs/
+outputs/
+temp/
+tmp/
+
+# Standalone scan/archive files
+*.zip
+*.tar
+*.tar.gz
+*.rar
+*.7z
+*.nii
+*.nii.gz
+*.dcm
+*.dicom
+
+# Raw image files (outside assets/docs)
+*.bmp
+*.tiff
+*.tif
+
+# ------------------------------------------------------------------------------
+# 2. PYTHON & ENVIRONMENT CACHES
+# ------------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.pyd
+
+# Virtual environments
+venv/
+.venv/
+env/
+.env
+ENV/
+env.bak/
+venv.bak/
+
+# IDE & OS files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Testing & Linting
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+
+# ------------------------------------------------------------------------------
+# 3. MODELS & WEIGHTS TRACKING (EXPLICITLY INCLUDED)
+# ------------------------------------------------------------------------------
+# Keep and track models folder and weights
+!models/
+!models/**
+!*.pt
+!*.pth
+!*.onnx
+!*.ckpt
