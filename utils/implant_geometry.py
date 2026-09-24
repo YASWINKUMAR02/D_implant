@@ -11,6 +11,7 @@ from utils.oralseg_inference import LABEL_MAP, TOOTH_FDI_MAP
 
 # Inverted mapping: FDI number (e.g. 46) -> Label Index (e.g. 32)
 FDI_TO_LABEL = {v: k for k, v in TOOTH_FDI_MAP.items()}
+LABEL_TO_FDI = dict(TOOTH_FDI_MAP)
 
 # All 32 adult permanent teeth in FDI notation
 ALL_FDI_TEETH = [

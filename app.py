@@ -52,6 +52,18 @@ CONVERTED_DIR   = ROOT_DIR / "converted"
 OUTPUTS_DIR     = ROOT_DIR / "outputs"
 CHECKPOINT_PATH = MODELS_DIR / "model_workstation39.pt"
 
+# ── DentalSegmentator model path ───────────────────────────────────────────────
+# Priority: DENTALSEGMENTATOR_MODEL_DIR env var → project-relative default
+_ds_env = os.environ.get("DENTALSEGMENTATOR_MODEL_DIR")
+DENTAL_SEG_MODEL_DIR: Path = (
+    Path(_ds_env) if _ds_env else
+    ROOT_DIR
+    / "Dataset112_DentalSegmentator_v100"
+    / "Dataset112_DentalSegmentator_v100"
+    / "nnUNetTrainer__nnUNetPlans__3d_fullres"
+)
+DENTAL_SEG_CHECKPOINT = DENTAL_SEG_MODEL_DIR / "fold_0" / "checkpoint_final.pth"
+
 for d in [UPLOADS_DIR, CONVERTED_DIR, OUTPUTS_DIR]:
     d.mkdir(exist_ok=True)
 
@@ -695,28 +707,29 @@ def render_sidebar():
 
         st.markdown("""
         <div class="brand">
-          <div class="brand-mark">OS</div>
+          <div class="brand-mark">DS</div>
           <div>
-            <div class="brand-name">OralSeg</div>
-            <div class="brand-sub">CBCT Segmentation</div>
+            <div class="brand-name">DentalSegmentator</div>
+            <div class="brand-sub">CBCT 3D Engine</div>
           </div>
         </div>
         """, unsafe_allow_html=True)
 
         st.markdown('<div class="side-label">Model Status</div>', unsafe_allow_html=True)
-        model_exists = CHECKPOINT_PATH.exists()
-        if model_exists:
+        ds_model_exists = DENTAL_SEG_CHECKPOINT.exists()
+
+        if ds_model_exists:
             st.markdown("""
             <div style="background:#F8FAFC;border:1px solid #E2E8F0;border-radius:6px;padding:8px 10px;font-size:11.5px;font-family:var(--mono);color:#0F172A;display:flex;align-items:center;gap:6px;">
               <span class="status-dot on"></span>
-              <span style="font-weight:600;">model_workstation39.pt</span>
+              <span style="font-weight:600;">DentalSegmentator: Ready</span>
             </div>
             """, unsafe_allow_html=True)
         else:
             st.markdown("""
             <div style="background:#FEF2F2;border:1px solid #FECACA;border-radius:6px;padding:8px 10px;font-size:11.5px;font-family:var(--mono);color:#DC2626;display:flex;align-items:center;gap:6px;">
               <span class="status-dot off"></span>
-              <span style="font-weight:600;">Model missing</span>
+              <span style="font-weight:600;">DentalSegmentator: Not Found</span>
             </div>
             """, unsafe_allow_html=True)
 
@@ -740,9 +753,9 @@ def render_sidebar():
 
         st.markdown(f"""
         <div class="side-meta">
-          <div><span class="dot">&#9679;</span>OralSeg 3D Engine v2.0</div>
-          <div><span class="dot">&#9679;</span>MONAI sliding window 96³</div>
-          <div><span class="dot">&#9679;</span>35 Anatomical Classes</div>
+          <div><span class="dot">&#9679;</span>DentalSeg: nnU-Net 3d_fullres</div>
+          <div><span class="dot">&#9679;</span>Dataset 112 (470 Cases)</div>
+          <div><span class="dot">&#9679;</span>100% Local · No cloud inference</div>
         </div>
         """, unsafe_allow_html=True)
 
@@ -755,11 +768,12 @@ def render_header():
     <div class="title-card">
       <div style="display:flex;align-items:center;gap:10px;">
         <h1 class="title-main">AI Dental Implant Planning System</h1>
-        <span class="title-badge">BETA</span>
+        <span class="title-badge">DENTALSEGMENTATOR</span>
       </div>
-      <p class="title-sub">CBCT-based 3D Dental Segmentation using OralSeg &nbsp;&bull;&nbsp; 35-Class Anatomical Segmentation</p>
+      <p class="title-sub">CBCT-based 3D Dental Segmentation &amp; Implant Planning using DentalSegmentator (nnU-Net 3D Full Resolution)</p>
     </div>
     """, unsafe_allow_html=True)
+
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -926,25 +940,137 @@ def process_upload(uploaded_file) -> Optional[dict]:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Pre-computed Benchmark Case Loader (Instant Review on Launch)
+# ─────────────────────────────────────────────────────────────────────────────
+@st.cache_resource(show_spinner=False)
+def load_precomputed_case(case_name: str = "K01") -> Optional[dict]:
+    """
+    Load an existing pre-computed segmentation from outputs/ and converted/
+    for immediate project demonstration and review in < 0.2s without waiting for inference.
+    """
+    from utils.nifti_utils import load_nifti_volume, validate_nifti_for_inference
+    import json
+
+    seg_path = OUTPUTS_DIR / f"{case_name}_ds_segmentation.nii.gz"
+    nii_path = CONVERTED_DIR / f"{case_name}.nii.gz"
+    json_path = OUTPUTS_DIR / f"{case_name}_ds_results.json"
+    metrics_path = OUTPUTS_DIR / f"{case_name}_ds_metrics.json"
+    mesh_path = OUTPUTS_DIR / f"{case_name}_ds_meshes.npz"
+
+    npy_cbct = CONVERTED_DIR / f"{case_name}_cbct.npy"
+    npy_seg = OUTPUTS_DIR / f"{case_name}_ds_seg.npy"
+
+    if not seg_path.exists() or not nii_path.exists():
+        return None
+
+    try:
+        # 1. Fast binary load (<0.05s) if .npy exists, else fallback to NIfTI
+        if npy_cbct.exists() and npy_seg.exists():
+            cbct_vol = np.load(str(npy_cbct))
+            seg_vol = np.load(str(npy_seg))
+        else:
+            cbct_vol, _, _ = load_nifti_volume(str(nii_path))
+            seg_vol, _, _ = load_nifti_volume(str(seg_path))
+            seg_vol = np.round(seg_vol).astype(np.uint8)
+            try:
+                np.save(str(npy_cbct), cbct_vol)
+                np.save(str(npy_seg), seg_vol)
+            except Exception:
+                pass
+
+        # 2. Fast metadata retrieval (0s)
+        seg_info = {}
+        if json_path.exists():
+            with open(json_path, "r") as f:
+                seg_info = json.load(f)
+
+        precomputed_metrics = None
+        if metrics_path.exists():
+            with open(metrics_path, "r") as f_m:
+                precomputed_metrics = json.load(f_m)
+
+        structures = {}
+        if precomputed_metrics and "struct_metrics" in precomputed_metrics:
+            for l_str, sm in precomputed_metrics["struct_metrics"].items():
+                structures[int(l_str)] = {
+                    "detected": sm.get("detected", False),
+                    "voxel_count": sm.get("voxel_count", 0),
+                }
+        else:
+            for l in range(1, 6):
+                structures[l] = {"detected": bool(np.any(seg_vol == l)), "voxel_count": int(np.sum(seg_vol == l))}
+        seg_info["structures"] = structures
+
+        precomputed_meshes = None
+        if mesh_path.exists():
+            precomputed_meshes = dict(np.load(mesh_path))
+
+        spacing_val = [0.4, 0.4, 0.4]
+        if "voxel_spacing" in seg_info:
+            spacing_val = seg_info["voxel_spacing"]
+        elif "spacing" in seg_info:
+            spacing_val = seg_info["spacing"]
+
+        nifti_info = {
+            "shape": list(cbct_vol.shape),
+            "spacing_mm": spacing_val,
+            "voxel_spacing": spacing_val,
+            "is_isotropic": True,
+            "min_hu": float(cbct_vol.min()) if cbct_vol is not None else -1000.0,
+            "max_hu": float(cbct_vol.max()) if cbct_vol is not None else 3000.0,
+        }
+
+        return {
+            "seg_model": "dentalseg",
+            "case_name": case_name,
+            "cbct_vol": cbct_vol,
+            "seg_vol": seg_vol,
+            "nifti_info": nifti_info,
+            "seg_info": seg_info,
+            "seg_path": str(seg_path),
+            "json_path": str(json_path),
+            "device_name": seg_info.get("device", "NVIDIA GeForce RTX 2050"),
+            "precomputed_metrics": precomputed_metrics,
+            "precomputed_meshes": precomputed_meshes,
+        }
+    except Exception as e:
+        logger.error(f"Error loading precomputed case {case_name}: {e}")
+        return None
+
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Main pipeline runner
 # ─────────────────────────────────────────────────────────────────────────────
-def run_pipeline(upload_state: dict, overlap: float = 0.25):
-    """Execute the full segmentation pipeline with progress reporting."""
+
+def run_pipeline(upload_state: dict, overlap: float = 0.25, model_choice: str = "oralseg"):
+    """Execute the full segmentation pipeline with progress reporting.
+
+    Args:
+        upload_state: dict from process_upload()
+        overlap:      OralSeg sliding-window overlap (ignored for DentalSegmentator)
+        model_choice: "oralseg" | "dentalseg"
+    """
     from utils.nifti_utils import dicom_series_to_nifti, validate_nifti_for_inference, load_nifti_volume
-    from utils.oralseg_inference import run_inference, save_result_json
 
     is_nifti     = upload_state.get("is_nifti", False)
     case_name    = upload_state["zip_name"]
     meta         = upload_state["meta"]
 
     nifti_path   = str(CONVERTED_DIR / f"{case_name}.nii.gz")
-    seg_path     = str(OUTPUTS_DIR   / f"{case_name}_segmentation.nii.gz")
-    json_path    = str(OUTPUTS_DIR   / f"{case_name}_results.json")
 
+    if model_choice == "dentalseg":
+        seg_path  = str(OUTPUTS_DIR / f"{case_name}_ds_segmentation.nii.gz")
+        json_path = str(OUTPUTS_DIR / f"{case_name}_ds_results.json")
+    else:
+        seg_path  = str(OUTPUTS_DIR / f"{case_name}_segmentation.nii.gz")
+        json_path = str(OUTPUTS_DIR / f"{case_name}_results.json")
+
+    model_label = "OralSeg" if model_choice == "oralseg" else "DentalSegmentator (nnU-Net)"
     if is_nifti:
         pipeline_steps = [
             "Validating NIfTI volume",
-            "Loading OralSeg model",
+            f"Loading {model_label} model",
             "Running 3D inference",
             "Generating segmentation mask",
             "Saving outputs",
@@ -957,7 +1083,7 @@ def run_pipeline(upload_state: dict, overlap: float = 0.25):
             "Reading DICOM metadata",
             "Converting DICOM → NIfTI",
             "Validating NIfTI volume",
-            "Loading OralSeg model",
+            f"Loading {model_label} model",
             "Running 3D inference",
             "Generating segmentation mask",
             "Saving outputs",
@@ -1015,35 +1141,66 @@ def run_pipeline(upload_state: dict, overlap: float = 0.25):
         nifti_info = validate_nifti_for_inference(nifti_path)
         log(f"Volume shape: {nifti_info['shape']}, spacing: {[f'{s:.2f}' for s in nifti_info['spacing_mm']]} mm")
 
-        # Step: Load model
-        advance(pipeline_steps[5 if not is_nifti else 1])
-        model, device, device_name, err = _load_oralseg_model()
-        if err:
-            raise RuntimeError(err)
-        log(f"OralSeg loaded on {device_name}")
-
-        # Step: Inference
-        advance(pipeline_steps[6 if not is_nifti else 2])
-        seg_array, seg_info = run_inference(
-            model, device, nifti_path, seg_path,
-            sw_batch_size=2, overlap=overlap,
-            progress_callback=log,
-        )
-        advance(pipeline_steps[7 if not is_nifti else 3])
-        log(f"Detected {seg_info['teeth_count']} teeth, {len(seg_info['detected_labels'])-1} total structures.")
-
-        # Step: Save JSON
-        advance(pipeline_steps[8 if not is_nifti else 4])
-        result_json = save_result_json(
-            json_path,
-            case_name=case_name,
-            num_dicom_slices=meta["num_slices"],
-            volume_shape=nifti_info["shape"],
-            voxel_spacing=nifti_info["spacing_mm"],
-            device_str=str(device),
-            checkpoint_name="model_workstation39.pt",
-            seg_info=seg_info,
-        )
+        # ── BRANCH: OralSeg vs DentalSegmentator ─────────────────────────────
+        if model_choice == "dentalseg":
+            from utils.dentalsegmentator_inference import (
+                run_ds_inference, save_ds_result_json, is_model_available
+            )
+            if not is_model_available():
+                raise FileNotFoundError(
+                    "DentalSegmentator model files not found. "
+                    f"Expected at: {DENTAL_SEG_MODEL_DIR}"
+                )
+            advance(pipeline_steps[5 if not is_nifti else 1])
+            log("DentalSegmentator (nnU-Net) initialising...")
+            advance(pipeline_steps[6 if not is_nifti else 2])
+            seg_array, seg_info = run_ds_inference(
+                nifti_path=nifti_path,
+                output_seg_path=seg_path,
+                progress_callback=log,
+            )
+            device_name = seg_info.get("device_name", "unknown")
+            advance(pipeline_steps[7 if not is_nifti else 3])
+            structs = sum(1 for v in seg_info.get("structures", {}).values() if v["detected"])
+            log(f"Detected {structs} structures (grouped — no individual FDI teeth).")
+            advance(pipeline_steps[8 if not is_nifti else 4])
+            result_json = save_ds_result_json(
+                output_json_path=json_path,
+                case_name=case_name,
+                num_dicom_slices=meta["num_slices"],
+                volume_shape=nifti_info["shape"],
+                voxel_spacing=nifti_info["spacing_mm"],
+                device_str=device_name,
+                seg_info=seg_info,
+            )
+        else:
+            # ── OralSeg (unchanged) ───────────────────────────────────────────
+            from utils.oralseg_inference import run_inference, save_result_json
+            advance(pipeline_steps[5 if not is_nifti else 1])
+            model, device, device_name, err = _load_oralseg_model()
+            if err:
+                raise RuntimeError(err)
+            log(f"OralSeg loaded on {device_name}")
+            advance(pipeline_steps[6 if not is_nifti else 2])
+            seg_array, seg_info = run_inference(
+                model, device, nifti_path, seg_path,
+                sw_batch_size=2, overlap=overlap,
+                progress_callback=log,
+            )
+            advance(pipeline_steps[7 if not is_nifti else 3])
+            log(f"Detected {seg_info['teeth_count']} teeth, {len(seg_info['detected_labels'])-1} total structures.")
+            advance(pipeline_steps[8 if not is_nifti else 4])
+            result_json = save_result_json(
+                json_path,
+                case_name=case_name,
+                num_dicom_slices=meta["num_slices"],
+                volume_shape=nifti_info["shape"],
+                voxel_spacing=nifti_info["spacing_mm"],
+                device_str=str(device),
+                checkpoint_name="model_workstation39.pt",
+                seg_info=seg_info,
+            )
+        # ── END BRANCH ────────────────────────────────────────────────────────
 
         # Step: Prepare viz
         advance(pipeline_steps[9 if not is_nifti else 5])
@@ -1082,6 +1239,7 @@ def run_pipeline(upload_state: dict, overlap: float = 0.25):
             "cbct_vol":     cbct_vol,
             "seg_vol":      seg_vol,
             "device_name":  device_name,
+            "seg_model":    model_choice,   # "oralseg" | "dentalseg"
         }
 
     except Exception as e:
@@ -1113,10 +1271,716 @@ def run_pipeline(upload_state: dict, overlap: float = 0.25):
         return None
 
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DentalSegmentator Results Renderer & 3D Implant Assistance Workstation
+# ─────────────────────────────────────────────────────────────────────────────
+def render_ds_results(result: dict):
+    """
+    Render segmentation results, physical volumetrics, bone density (HU) analysis,
+    and 3D implant planning workstation for DentalSegmentator (nnU-Net, 6-class).
+    Uses disk-cached precomputed metrics & 3D meshes for instantaneous (0s) rendering.
+    """
+    from utils.dentalsegmentator_inference import DS_LABEL_MAP, DS_LABEL_COLORS
+    from utils.dentalsegmentator_planner import (
+        calculate_structure_volumetrics_and_density,
+        calculate_individual_tooth_volumetrics,
+    )
+    from utils.visualization import render_slice_views, extract_mesh_for_label
+    from datetime import datetime
+    import pandas as pd
+    import json
+
+    seg_info    = result["seg_info"]
+    cbct_vol    = result["cbct_vol"]
+    seg_vol     = result["seg_vol"]
+    case_name   = result["case_name"]
+    nifti_info  = result.get("nifti_info", {})
+    device_name = result.get("device_name", "unknown")
+
+    spacing_arr = nifti_info.get("spacing_mm", [1.0, 1.0, 1.0])
+    if not spacing_arr or len(spacing_arr) < 3:
+        spacing_arr = [1.0, 1.0, 1.0]
+
+    # ── 1. Retrieve or Compute Metrics & Volumetrics (0s if precomputed) ────────
+    precomputed_metrics = result.get("precomputed_metrics")
+    metrics_path = OUTPUTS_DIR / f"{case_name}_ds_metrics.json"
+
+    if precomputed_metrics:
+        struct_metrics = {int(k): v for k, v in precomputed_metrics.get("struct_metrics", {}).items()}
+        tooth_instances = precomputed_metrics.get("tooth_instances", [])
+    elif metrics_path.exists():
+        try:
+            with open(metrics_path, "r") as f_m:
+                pm = json.load(f_m)
+                struct_metrics = {int(k): v for k, v in pm.get("struct_metrics", {}).items()}
+                tooth_instances = pm.get("tooth_instances", [])
+        except Exception:
+            struct_metrics = calculate_structure_volumetrics_and_density(cbct_vol, seg_vol, spacing_arr)
+            tooth_instances = calculate_individual_tooth_volumetrics(seg_vol, spacing_arr)
+    else:
+        struct_metrics = calculate_structure_volumetrics_and_density(cbct_vol, seg_vol, spacing_arr)
+        tooth_instances = calculate_individual_tooth_volumetrics(seg_vol, spacing_arr)
+
+    # ── 2. Retrieve or Cache 3D Meshes (0s if precomputed) ────────────────────
+    precomputed_meshes = result.get("precomputed_meshes")
+    mesh_path = OUTPUTS_DIR / f"{case_name}_ds_meshes.npz"
+    if precomputed_meshes is None and mesh_path.exists():
+        try:
+            precomputed_meshes = dict(np.load(mesh_path))
+            result["precomputed_meshes"] = precomputed_meshes
+        except Exception:
+            precomputed_meshes = None
+
+    # ── Top-Level Workflow Tabs ───────────────────────────────────────────────
+    tab_ds_overview, tab_ds_planner = st.tabs([
+        "📊 CBCT VOLUMETRICS & BONE DENSITY",
+        "🦷 3D CBCT IMPLANT WORKSTATION",
+    ])
+
+    with tab_ds_overview:
+        # ── 1. Header ─────────────────────────────────────────────────────────
+        st.markdown(f"""
+        <div style="background:#FFFFFF;border:1px solid #CBD5E1;border-radius:10px;
+                    padding:16px 20px;margin-bottom:16px;box-shadow:0 1px 4px rgba(15,23,42,0.04);">
+          <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;">
+            <div style="display:flex;align-items:center;gap:12px;">
+              <div style="width:42px;height:42px;border-radius:10px;background:#0F3B7A;
+                          display:flex;align-items:center;justify-content:center;
+                          font-size:20px;color:#fff;font-weight:800;">DS</div>
+              <div>
+                <div style="font-size:18px;font-weight:800;color:#0F3B7A;">DentalSegmentator — Results &amp; Analytics</div>
+                <div style="font-size:12px;color:#64748B;margin-top:2px;">
+                  nnU-Net 3D Full Res &nbsp;·&nbsp; Dataset 112 &nbsp;·&nbsp; fold 0
+                  &nbsp;·&nbsp; Device: {device_name}
+                  &nbsp;·&nbsp; {datetime.now().strftime("%d %b %Y")}
+                </div>
+              </div>
+            </div>
+            <span style="background:#FFF7ED;border:1px solid #FED7AA;border-radius:6px;
+                         padding:4px 12px;font-size:11px;font-weight:700;color:#92400E;">
+              6-CLASS GROUPED ANATOMY
+            </span>
+          </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        # ── 2. Structure Detection Summary ────────────────────────────────────
+        st.markdown("#### 🔍 Detected Anatomical Structures")
+        label_style = {
+            1: ("#EFF6FF", "#BFDBFE", "#1E40AF"),
+            2: ("#F0FDF4", "#BBF7D0", "#166534"),
+            3: ("#EFF6FF", "#93C5FD", "#1D4ED8"),
+            4: ("#FFF7ED", "#FED7AA", "#92400E"),
+            5: ("#FEF2F2", "#FECACA", "#991B1B"),
+        }
+        cols = st.columns(5)
+        for i, (label_idx, label_name) in enumerate(DS_LABEL_MAP.items()):
+            if label_idx == 0:
+                continue
+            info = struct_metrics.get(label_idx, {})
+            detected = info.get("detected", False)
+            voxels   = info.get("voxel_count", 0)
+            vol_cm3  = info.get("volume_cm3", 0.0)
+            bg, border, fg = label_style.get(label_idx, ("#F8FAFC", "#E2E8F0", "#0F172A"))
+            with cols[i - 1]:
+                st.markdown(f"""
+                <div style="background:{bg};border:1px solid {border};border-radius:8px;
+                            padding:10px 12px;text-align:center;">
+                  <div style="font-size:20px;">{"✅" if detected else "⬜"}</div>
+                  <div style="font-size:11px;font-weight:700;color:{fg};margin-top:4px;line-height:1.3;">{label_name}</div>
+                  <div style="font-size:10px;color:#64748B;margin-top:4px;">{vol_cm3:.1f} cm³ &middot; {voxels:,} vx</div>
+                </div>
+                """, unsafe_allow_html=True)
+
+        st.markdown("<div style='margin-top:14px'></div>", unsafe_allow_html=True)
+
+        # ── 3. Comprehensive Bone Density & Volumetrics Table ─────────────────
+        st.markdown("#### 📈 Anatomical Volumetrics & Misch Bone Density (HU) Profile")
+
+        rows_density = []
+        for l_idx, l_name in DS_LABEL_MAP.items():
+            if l_idx == 0:
+                continue
+            m = struct_metrics.get(l_idx, {})
+            if not m.get("detected", False):
+                continue
+            bbox = m.get("bbox_mm", (0, 0, 0))
+            rows_density.append({
+                "Label": f"Label {l_idx}",
+                "Anatomical Structure": l_name,
+                "Volume (cm³)": f"{m.get('volume_cm3', 0.0):.2f}",
+                "Volume (mm³)": f"{m.get('volume_mm3', 0.0):,.0f}",
+                "Bounding Extent (W × D × H mm)": f"{bbox[0]} × {bbox[1]} × {bbox[2]}",
+                "Mean HU (Density)": f"{m.get('mean_hu', 0.0):.1f} HU",
+                "Median HU": f"{m.get('median_hu', 0.0):.1f} HU",
+                "Std Dev (HU)": f"± {m.get('std_hu', 0.0):.1f}",
+                "Misch Bone Class": f"{m.get('misch_class', 'N/A')} ({m.get('misch_name', '')})",
+            })
+
+        if rows_density:
+            df_dens = pd.DataFrame(rows_density)
+            st.dataframe(df_dens, use_container_width=True, hide_index=True)
+            st.caption(
+                "💡 **Misch Classification:** D1 (>1250 HU: Dense Cortical), D2 (850–1250 HU: Thick Cortical/Coarse Trabecular), "
+                "D3 (350–850 HU: Thin Cortical/Fine Trabecular), D4 (150–350 HU: Fine Trabecular/Soft), D5 (<150 HU: Immature/Resorbed)."
+            )
+
+        # ── 4. Individual Tooth Volumetric Breakdown ──────────────────────────
+        if tooth_instances:
+            with st.expander(f"🦷 Individual Teeth Volumetrics Breakdown ({len(tooth_instances)} Isolated Teeth)", expanded=False):
+                rows_teeth = []
+                for t in tooth_instances:
+                    dim = t.get("dimensions_mm", (0, 0, 0))
+                    rows_teeth.append({
+                        "Tooth #": f"#{t['tooth_num']}",
+                        "Dental Arch": t["arch"],
+                        "Side": t["side"],
+                        "Volume (cm³)": f"{t['volume_cm3']:.3f}",
+                        "Volume (mm³)": f"{t['volume_mm3']:.1f}",
+                        "Dimensions (W × D × H mm)": f"{dim[0]} × {dim[1]} × {dim[2]}",
+                        "Voxel Count": f"{t['voxel_count']:,}",
+                    })
+                df_teeth = pd.DataFrame(rows_teeth)
+                st.dataframe(df_teeth, use_container_width=True, hide_index=True)
+
+        # ── 5. Volume Metrics ─────────────────────────────────────────────────
+        st.markdown("---")
+        shape_str = " × ".join(str(s) for s in cbct_vol.shape) if cbct_vol is not None else "N/A"
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Volume Shape", shape_str)
+        m2.metric("X Spacing", f"{spacing_arr[0]:.3f} mm")
+        m3.metric("Y Spacing", f"{spacing_arr[1]:.3f} mm")
+        m4.metric("Z Spacing", f"{spacing_arr[2]:.3f} mm")
+
+        # ── 6. 3D Viewer (Instant Render) ─────────────────────────────────────
+        st.markdown("---")
+        st.markdown("#### 🧊 3D Interactive Anatomy Viewer")
+        if seg_vol is not None and cbct_vol is not None:
+            try:
+                import plotly.graph_objects as go
+
+                fig3d = go.Figure()
+                all_verts = []
+
+                bone_lighting  = dict(ambient=0.45, diffuse=0.70, specular=0.30, roughness=0.45)
+                tooth_lighting = dict(ambient=0.55, diffuse=0.85, specular=0.50, roughness=0.18, fresnel=0.1)
+                canal_lighting = dict(ambient=0.75, diffuse=0.90, specular=0.60, roughness=0.10)
+
+                opacities = {1: 0.45, 2: 0.45, 3: 0.95, 4: 0.95, 5: 1.00}
+                lightings = {1: bone_lighting, 2: bone_lighting, 3: tooth_lighting, 4: tooth_lighting, 5: canal_lighting}
+
+                for label_idx, label_name in DS_LABEL_MAP.items():
+                    if label_idx == 0:
+                        continue
+                    if not struct_metrics.get(label_idx, {}).get("detected", False):
+                        continue
+                    rgb = DS_LABEL_COLORS.get(label_idx, (0.5, 0.5, 0.5))
+                    color_hex = "#{:02x}{:02x}{:02x}".format(
+                        int(rgb[0] * 255), int(rgb[1] * 255), int(rgb[2] * 255)
+                    )
+
+                    if precomputed_meshes and f"verts_{label_idx}" in precomputed_meshes:
+                        v = precomputed_meshes[f"verts_{label_idx}"]
+                        f = precomputed_meshes[f"faces_{label_idx}"]
+                    else:
+                        v, f = extract_mesh_for_label(
+                            seg_vol,
+                            [label_idx],
+                            step_size=3 if label_idx in [1, 2] else 2,
+                            voxel_spacing=tuple(spacing_arr) if spacing_arr else None,
+                            min_voxels=35,
+                            keep_largest_component=True if label_idx in [1, 2] else False,
+                            smoothing_iterations=8,
+                            decimate_target=0.70 if label_idx in [1, 2] else 0.85,
+                        )
+
+                    if v is not None and f is not None and len(v) > 0 and len(f) > 0:
+                        all_verts.append(v)
+                        fig3d.add_trace(go.Mesh3d(
+                            x=v[:, 0], y=v[:, 1], z=v[:, 2],
+                            i=f[:, 0], j=f[:, 1], k=f[:, 2],
+                            color=color_hex,
+                            opacity=opacities.get(label_idx, 0.8),
+                            name=label_name,
+                            lighting=lightings.get(label_idx, bone_lighting),
+                            hoverinfo="name",
+                            flatshading=False,
+                        ))
+
+                if all_verts:
+                    fig3d.update_layout(
+                        scene=dict(
+                            xaxis=dict(visible=False, backgroundcolor="#000000", showgrid=False),
+                            yaxis=dict(visible=False, backgroundcolor="#000000", showgrid=False),
+                            zaxis=dict(visible=False, backgroundcolor="#000000", showgrid=False),
+                            bgcolor="#000000",
+                            aspectmode="data",
+                            camera=dict(eye=dict(x=1.7, y=-1.6, z=0.7), up=dict(x=0, y=0, z=1)),
+                        ),
+                        paper_bgcolor="#000000",
+                        plot_bgcolor="#000000",
+                        margin=dict(l=0, r=0, b=0, t=10),
+                        legend=dict(
+                            font=dict(color="#FFFFFF", size=10),
+                            bgcolor="rgba(0, 0, 0, 0.75)",
+                            bordercolor="#262626",
+                            borderwidth=1,
+                            yanchor="top",
+                            y=0.98,
+                            xanchor="right",
+                            x=0.98,
+                            itemsizing="constant",
+                        ),
+                        height=540,
+                    )
+                    st.plotly_chart(fig3d, use_container_width=True)
+                else:
+                    st.info("No 3D structures reached the mesh extraction threshold.")
+            except Exception as e3d:
+                st.warning(f"3D viewer error: {e3d}")
+        else:
+            st.info("Volume data not available.")
+
+        # ── 7. 2D MPR Slices ──────────────────────────────────────────────────
+        st.markdown("---")
+        st.markdown("#### 🖼️ 2D Multiplanar Reconstruction (MPR) Slices")
+        if cbct_vol is not None and seg_vol is not None:
+            try:
+                import matplotlib.pyplot as plt
+                x_max, y_max, z_max = cbct_vol.shape
+
+                c_s1, c_s2, c_s3 = st.columns(3)
+                with c_s1:
+                    ds_ax = st.slider("Axial Slice (Z)", 0, z_max - 1, z_max // 2, key="ds_sl_ax")
+                with c_s2:
+                    ds_cor = st.slider("Coronal Slice (Y)", 0, y_max - 1, y_max // 2, key="ds_sl_cor")
+                with c_s3:
+                    ds_sag = st.slider("Sagittal Slice (X)", 0, x_max - 1, x_max // 2, key="ds_sl_sag")
+
+                fig_mpr = render_slice_views(
+                    cbct_vol, seg_vol,
+                    axial_idx=ds_ax,
+                    coronal_idx=ds_cor,
+                    sagittal_idx=ds_sag,
+                    figsize=(14.5, 4.6),
+                )
+                st.pyplot(fig_mpr, use_container_width=True)
+                plt.close(fig_mpr)
+            except Exception as empr:
+                st.warning(f"MPR error: {empr}")
+        else:
+            st.info("Volume data not available for MPR.")
+
+        # ── 8. Colour Legend ──────────────────────────────────────────────────
+        st.markdown("---")
+        st.markdown("#### 🏷️ Label Legend")
+        leg_cols = st.columns(5)
+        for i, (label_idx, label_name) in enumerate(DS_LABEL_MAP.items()):
+            if label_idx == 0:
+                continue
+            rgb = DS_LABEL_COLORS.get(label_idx, (0.5, 0.5, 0.5))
+            css_color = f"rgb({int(rgb[0]*255)},{int(rgb[1]*255)},{int(rgb[2]*255)})"
+            with leg_cols[i - 1]:
+                st.markdown(f"""
+                <div style="display:flex;align-items:center;gap:8px;padding:6px 0;">
+                  <div style="width:16px;height:16px;border-radius:3px;background:{css_color};flex-shrink:0;"></div>
+                  <span style="font-size:12px;font-weight:600;color:#0F172A;">{label_idx}: {label_name}</span>
+                </div>
+                """, unsafe_allow_html=True)
+
+        # ── 9. Downloads ──────────────────────────────────────────────────────
+        st.markdown("---")
+        st.markdown("#### ⬇ Download Results")
+        dl1, dl2 = st.columns(2)
+        with dl1:
+            sp = result.get("seg_path", "")
+            if sp and os.path.exists(sp):
+                with open(sp, "rb") as fseg:
+                    st.download_button(
+                        "📦 Download Segmentation (.nii.gz)", data=fseg.read(),
+                        file_name=f"{case_name}_ds_segmentation.nii.gz",
+                        mime="application/gzip", key="dl_ds_seg", use_container_width=True,
+                    )
+            else:
+                st.info("Segmentation NIfTI not found.")
+        with dl2:
+            jp = result.get("json_path", "")
+            if jp and os.path.exists(jp):
+                with open(jp, "r") as fjson:
+                    st.download_button(
+                        "📋 Download Results JSON", data=fjson.read(),
+                        file_name=f"{case_name}_ds_results.json",
+                        mime="application/json", key="dl_ds_json", use_container_width=True,
+                    )
+
+        st.markdown("""
+        <div class="disclaimer-banner">
+          🔒 All processing is 100% local. No CBCT/DICOM data was uploaded to any cloud service.
+          For research and clinical decision support only.
+        </div>
+        """, unsafe_allow_html=True)
+
+    with tab_ds_planner:
+        # ── 3D CBCT Implant Assistance Workstation ────────────────────────────
+        render_ds_implant_workstation(result)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DentalSegmentator 3D CBCT Implant Assistance Workstation
+# ─────────────────────────────────────────────────────────────────────────────
+def render_ds_implant_workstation(result: dict):
+    """
+    Renders the interactive 3D CBCT AI-Assisted Implant Planning Workstation
+    tailored for DentalSegmentator's 6-class volumetric segmentation with
+    real-time bone density (HU) & Misch classification.
+    """
+    from utils.dentalsegmentator_planner import (
+        estimate_site_3d_coordinates_ds, measure_bone_at_site_ds,
+        create_virtual_implant_mesh_ds, evaluate_implant_safety_ds,
+        build_3d_implant_scene_ds, render_2d_mpr_implant_ds,
+        calculate_implant_site_bone_density,
+        ALL_FDI_TEETH, FDI_NAMES, QUADRANTS
+    )
+    from utils.visualization import export_binary_stl
+    import io
+
+    seg_vol    = result["seg_vol"]
+    cbct_vol   = result["cbct_vol"]
+    case_name  = result["case_name"]
+    nifti_info = result.get("nifti_info", {})
+    precomputed_meshes = result.get("precomputed_meshes")
+    spacing    = nifti_info.get("spacing_mm", [1.0, 1.0, 1.0])
+    if len(spacing) < 3:
+        spacing = [1.0, 1.0, 1.0]
+
+    # Header
+    st.markdown("""
+    <div style="background:#FFFFFF;border:1px solid #CBD5E1;border-radius:10px;
+                padding:16px 20px;margin-bottom:16px;box-shadow:0 1px 4px rgba(15,23,42,0.04);">
+      <div style="display:flex;justify-content:space-between;align-items:center;">
+        <div>
+          <div style="font-size:18px;font-weight:800;color:#0F3B7A;display:flex;align-items:center;gap:8px;">
+            <span>🦷</span> DentalSegmentator 3D CBCT Implant Workstation
+          </div>
+          <div style="font-size:12px;color:#64748B;margin-top:2px;">
+            Interactive Virtual Fixture Placement &middot; Real-Time Mandibular Canal Safety Engine &middot; Misch Bone Quality &middot; Physical mm
+          </div>
+        </div>
+        <div style="background:#FFF7ED;border:1px solid #FED7AA;border-radius:6px;padding:4px 10px;font-size:11px;font-weight:700;color:#92400E;">
+          DentalSegmentator (nnU-Net) Active
+        </div>
+      </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # ── Site Selection ────────────────────────────────────────────────────────
+    col_q, col_site = st.columns([1, 2])
+    with col_q:
+        quadrant_sel = st.selectbox(
+            "Dental Quadrant",
+            options=[
+                "Mandibular Right (Teeth 48–41)",
+                "Mandibular Left (Teeth 31–38)",
+                "Maxillary Right (Teeth 18–11)",
+                "Maxillary Left (Teeth 21–28)",
+            ],
+            index=0,
+            key="ds_quad_select",
+        )
+
+    quad_id = 4 if "48–41" in quadrant_sel else (3 if "31–38" in quadrant_sel else (1 if "18–11" in quadrant_sel else 2))
+    teeth_in_quad = QUADRANTS.get(quad_id, [])
+
+    with col_site:
+        selected_fdi = st.selectbox(
+            "Target Implant Site (FDI Notation)",
+            options=teeth_in_quad,
+            format_func=lambda x: f"FDI {x} — {FDI_NAMES.get(x, 'Tooth')}",
+            index=2 if len(teeth_in_quad) > 2 else 0,
+            key="ds_fdi_site_sel",
+        )
+
+    is_mandibular = (selected_fdi >= 31 and selected_fdi <= 48)
+
+    # ── Calculate Anatomical Coordinates & Bone Measurements ───────────────────
+    base_center_vox = estimate_site_3d_coordinates_ds(seg_vol, selected_fdi, voxel_spacing_mm=spacing)
+    bone_meas = measure_bone_at_site_ds(seg_vol, base_center_vox, is_mandibular=is_mandibular, voxel_spacing_mm=spacing)
+
+    st.markdown("---")
+
+    # ── Interactive Fixture Positioning Controls ──────────────────────────────
+    st.markdown("#### ⚙️ Virtual Implant Dimensions & 3D Placement Controls")
+
+    c_p1, c_p2, c_p3, c_p4 = st.columns(4)
+    with c_p1:
+        implant_diam = st.slider(
+            "Diameter Ø (mm)",
+            min_value=3.0, max_value=6.0,
+            value=float(bone_meas["suggested_diameter_mm"]),
+            step=0.1, key="ds_imp_diam",
+        )
+    with c_p2:
+        implant_len = st.slider(
+            "Length L (mm)",
+            min_value=6.0, max_value=16.0,
+            value=float(bone_meas["suggested_length_mm"]),
+            step=0.5, key="ds_imp_len",
+        )
+    with c_p3:
+        ang_bl = st.slider(
+            "Buccolingual Tilt (°)",
+            min_value=-25.0, max_value=25.0,
+            value=0.0, step=1.0, key="ds_imp_ang_bl",
+            help="Positive = Buccal tilt, Negative = Lingual tilt",
+        )
+    with c_p4:
+        ang_md = st.slider(
+            "Mesiodistal Tilt (°)",
+            min_value=-25.0, max_value=25.0,
+            value=0.0, step=1.0, key="ds_imp_ang_md",
+            help="Positive = Mesial tilt, Negative = Distal tilt",
+        )
+
+    with st.expander("📍 Fine-Tune 3D Position Offsets (mm)", expanded=False):
+        c_o1, c_o2, c_o3 = st.columns(3)
+        with c_o1:
+            off_x_mm = st.slider("Mesiodistal Offset X (mm)", -10.0, 10.0, 0.0, 0.5, key="ds_off_x")
+        with c_o2:
+            off_y_mm = st.slider("Buccolingual Offset Y (mm)", -10.0, 10.0, 0.0, 0.5, key="ds_off_y")
+        with c_o3:
+            off_z_mm = st.slider("Apico-Coronal Offset Z (mm)", -10.0, 10.0, 0.0, 0.5, key="ds_off_z")
+
+    # Apply physical offsets to voxel center
+    sx, sy, sz = max(0.1, spacing[0]), max(0.1, spacing[1]), max(0.1, spacing[2])
+    adj_center_vox = np.array([
+        base_center_vox[0] + (off_x_mm / sx),
+        base_center_vox[1] + (off_y_mm / sy),
+        base_center_vox[2] + (off_z_mm / sz),
+    ])
+
+    # ── Generate Mesh & Evaluate Real-Time Safety & Density ───────────────────
+    imp_verts, imp_faces, imp_pts_vox, apex_pt_mm = create_virtual_implant_mesh_ds(
+        adj_center_vox,
+        diameter_mm=implant_diam,
+        length_mm=implant_len,
+        angulation_deg=(ang_bl, ang_md),
+        voxel_spacing_mm=spacing,
+        is_mandibular=is_mandibular,
+    )
+
+    canal_mesh_pts = precomputed_meshes.get("verts_5") if precomputed_meshes else None
+    safety_eval = evaluate_implant_safety_ds(
+        imp_pts_vox,
+        apex_point_mm=apex_pt_mm,
+        seg_vol=seg_vol,
+        voxel_spacing_mm=spacing,
+        is_mandibular=is_mandibular,
+        canal_mesh_points_mm=canal_mesh_pts,
+    )
+
+    site_density = calculate_implant_site_bone_density(
+        cbct_vol, seg_vol, imp_pts_vox, is_mandibular=is_mandibular, voxel_spacing_mm=spacing
+    )
+
+    # ── Key Clinical Metrics Banner ───────────────────────────────────────────
+    st.markdown("<div style='margin-top:10px;'></div>", unsafe_allow_html=True)
+    m1, m2, m3, m4, m5 = st.columns(5)
+
+    canal_str = f"{safety_eval['canal_distance_mm']} mm" if safety_eval['canal_distance_mm'] is not None else "N/A (Maxilla)"
+    canal_color = "#16A34A" if (safety_eval['canal_distance_mm'] and safety_eval['canal_distance_mm'] >= 2.0) else ("#DC2626" if (safety_eval['canal_distance_mm'] and safety_eval['canal_distance_mm'] < 1.0) else "#D97706")
+
+    m1.metric("Available Bone Height", f"{bone_meas['bone_height_mm']:.1f} mm")
+    m2.metric("Ridge Width (Crest)", f"{bone_meas['ridge_width_crest_mm']:.1f} mm")
+    m3.metric("Apex-to-Canal Clearance", canal_str)
+    m4.metric("Site Bone Density", f"{site_density['mean_hu']} HU ({site_density['misch_class']})")
+    m5.metric("Cortical Containment", f"{safety_eval['containment_pct']:.0f}%")
+
+    st.markdown(f"""
+    <div style="background:{'#ECFDF5' if safety_eval['safety_tier'] == 'SAFE' else ('#FEF2F2' if safety_eval['safety_tier'] == 'CRITICAL_COLLISION' else '#FFFBEB')};
+                border:1.5px solid {'#10B981' if safety_eval['safety_tier'] == 'SAFE' else ('#EF4444' if safety_eval['safety_tier'] == 'CRITICAL_COLLISION' else '#F59E0B')};
+                border-radius:8px;padding:10px 16px;margin-bottom:14px;display:flex;align-items:center;justify-content:space-between;">
+      <div style="font-weight:800;font-size:13px;color:{'#065F46' if safety_eval['safety_tier'] == 'SAFE' else ('#991B1B' if safety_eval['safety_tier'] == 'CRITICAL_COLLISION' else '#92400E')};">
+        {safety_eval['badge']} &nbsp;&bull;&nbsp; Misch Bone Quality: {site_density['misch_class']} ({site_density['misch_name']})
+      </div>
+      <div style="font-size:12px;font-weight:600;color:#334155;">
+        {site_density['clinical_protocol']}
+      </div>
+    """, unsafe_allow_html=True)
+
+    # ── Split Viewports: 3D Scene + 2D MPR ────────────────────────────────────
+    v3d_col, mpr_col = st.columns([3, 2])
+
+    with v3d_col:
+        st.markdown("#### 🧊 3D Interactive Surgical Viewport")
+        col_cam, col_layers = st.columns([2, 1])
+        with col_cam:
+            cam_choice = st.radio(
+                "Camera Perspective",
+                ["oblique", "anterior", "occlusal", "right_lateral", "left_lateral"],
+                index=0, horizontal=True, key="ds_cam_radio",
+            )
+
+        fig_3d_imp = build_3d_implant_scene_ds(
+            seg_vol,
+            implant_verts_mm=imp_verts,
+            implant_faces=imp_faces,
+            apex_point_mm=apex_pt_mm,
+            nearest_canal_point_mm=safety_eval["nearest_canal_point_mm"],
+            safety_tier=safety_eval["safety_tier"],
+            selected_fdi=selected_fdi,
+            voxel_spacing_mm=spacing,
+            show_maxilla=True,
+            show_mandible=True,
+            show_teeth=True,
+            show_canal=True,
+            camera_preset=cam_choice,
+            height=520,
+            precomputed_meshes=precomputed_meshes,
+        )
+        st.plotly_chart(fig_3d_imp, use_container_width=True)
+
+    with mpr_col:
+        st.markdown("#### 🖼️ Synchronized 2D Planning Slices")
+        default_mpr_path = OUTPUTS_DIR / f"{case_name}_ds_default_mpr.png"
+        is_default_params = (
+            selected_fdi == 46 and abs(off_x_mm) < 0.01 and abs(off_y_mm) < 0.01 and abs(off_z_mm) < 0.01
+            and abs(ang_bl) < 0.01 and abs(ang_md) < 0.01
+            and abs(implant_diam - float(bone_meas["suggested_diameter_mm"])) < 0.01
+            and abs(implant_len - float(bone_meas["suggested_length_mm"])) < 0.01
+        )
+
+        if is_default_params and default_mpr_path.exists():
+            st.image(str(default_mpr_path), use_container_width=True)
+        else:
+            with st.spinner("Generating cross-sectional slices..."):
+                fig_2d_imp = render_2d_mpr_implant_ds(
+                    cbct_vol, seg_vol,
+                    center_voxel=adj_center_vox,
+                    diameter_mm=implant_diam,
+                    length_mm=implant_len,
+                    voxel_spacing_mm=spacing,
+                    is_mandibular=is_mandibular,
+                    figsize=(13.0, 11.0),
+                )
+                st.pyplot(fig_2d_imp, use_container_width=True)
+                import matplotlib.pyplot as plt
+                plt.close(fig_2d_imp)
+
+    # ── Dentist Review & Pre-Surgical Dossier Card ────────────────────────────
+    st.markdown("---")
+    st.markdown(f"""
+    <div style="background:#FFFFFF;border:2px solid #CBD5E1;border-radius:12px;padding:18px 22px;box-shadow:0 2px 6px rgba(15,23,42,0.04);">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:12px;padding-bottom:10px;border-bottom:1px solid #E2E8F0;">
+        <div>
+          <div style="font-size:16px;font-weight:800;color:#0F3B7A;">📋 Dentist Review &amp; Pre-Surgical Dossier — Site FDI {selected_fdi}</div>
+          <div style="font-size:12px;color:#64748B;margin-top:2px;">{FDI_NAMES.get(selected_fdi, '')} &middot; Physical CBCT Dimensions</div>
+        </div>
+        <div style="background:#EFF6FF;border:1px solid #BFDBFE;border-radius:6px;padding:4px 10px;font-size:11.5px;font-weight:700;color:#1E40AF;">
+          {implant_diam:.1f} × {implant_len:.1f} mm Virtual Fixture
+        </div>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px;">
+        <div style="background:#F8FAFC;border:1px solid #E2E8F0;border-radius:8px;padding:10px 12px;font-size:12px;">
+          <b>• Target Site:</b> FDI {selected_fdi}<br>
+          <b>• Arch:</b> {'Mandibular (Lower)' if is_mandibular else 'Maxillary (Upper)'}<br>
+          <b>• Alveolar Height:</b> ~ {bone_meas['bone_height_mm']:.1f} mm<br>
+          <b>• Misch Density:</b> {site_density['misch_class']} ({site_density['mean_hu']} HU)
+        </div>
+        <div style="background:#F8FAFC;border:1px solid #E2E8F0;border-radius:8px;padding:10px 12px;font-size:12px;">
+          <b>• Ridge Width (Crest):</b> ~ {bone_meas['ridge_width_crest_mm']:.1f} mm<br>
+          <b>• Ridge Width (+4mm):</b> ~ {bone_meas['ridge_width_mid_mm']:.1f} mm<br>
+          <b>• Cortical Containment:</b> ~ {safety_eval['containment_pct']:.0f}%<br>
+          <b>• Drilling Protocol:</b> {site_density['misch_name']}
+        </div>
+        <div style="background:#F8FAFC;border:1px solid #E2E8F0;border-radius:8px;padding:10px 12px;font-size:12px;">
+          <b>• Apex-to-Canal:</b> {canal_str}<br>
+          <b>• Tilt (BL / MD):</b> {ang_bl:+.0f}° / {ang_md:+.0f}°<br>
+          <b>• Safety Clearance:</b> <span style="color:{canal_color};font-weight:700;">{safety_eval['safety_tier']}</span>
+        </div>
+      </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # ── Export Controls ───────────────────────────────────────────────────────
+    st.markdown("<div style='margin-top:16px;'></div>", unsafe_allow_html=True)
+    st.markdown("#### ⬇ Export Implant Planning Dossier")
+    ex1, ex2, ex3 = st.columns(3)
+
+    with ex1:
+        # Export Virtual Implant STL
+        buf_stl = io.BytesIO()
+        try:
+            from utils.visualization import export_binary_stl
+            stl_tmp = str(OUTPUTS_DIR / f"{case_name}_ds_implant_fdi_{selected_fdi}.stl")
+            export_binary_stl(imp_verts, imp_faces, stl_tmp)
+            if os.path.exists(stl_tmp):
+                with open(stl_tmp, "rb") as f_stl:
+                    st.download_button(
+                        "⬇ Download Mesh (.stl)",
+                        data=f_stl.read(),
+                        file_name=f"{case_name}_implant_fdi_{selected_fdi}.stl",
+                        mime="application/octet-stream",
+                        key="ds_dl_imp_stl",
+                        use_container_width=True,
+                    )
+        except Exception as e_stl:
+            st.info("STL export helper unavailable.")
+
+    ds_plan_payload = {
+        "case_name": case_name,
+        "model": "DentalSegmentator (nnU-Net 3d_fullres)",
+        "selected_fdi": int(selected_fdi),
+        "tooth_name": FDI_NAMES.get(selected_fdi, ""),
+        "is_mandibular": bool(is_mandibular),
+        "implant_diameter_mm": float(implant_diam),
+        "implant_length_mm": float(implant_len),
+        "angulation_buccolingual_deg": float(ang_bl),
+        "angulation_mesiodistal_deg": float(ang_md),
+        "bone_measurements": bone_meas,
+        "bone_density_osteotomy": site_density,
+        "safety_evaluation": {
+            "canal_distance_mm": safety_eval["canal_distance_mm"],
+            "containment_pct": safety_eval["containment_pct"],
+            "safety_tier": safety_eval["safety_tier"],
+        },
+        "disclaimer": "CBCT Decision Support Only — Clinical examination and dentist review required.",
+    }
+
+    with ex2:
+        import json
+        plan_json = json.dumps(ds_plan_payload, indent=2)
+        st.download_button(
+            "⬇ Export Dossier (JSON)",
+            data=plan_json,
+            file_name=f"{case_name}_ds_implant_plan_fdi_{selected_fdi}.json",
+            mime="application/json",
+            key="ds_dl_imp_json",
+            use_container_width=True,
+        )
+
+    with ex3:
+        try:
+            from utils.pdf_report import generate_ds_pdf_report
+            ds_pdf_bytes = generate_ds_pdf_report(ds_plan_payload)
+            st.download_button(
+                "⬇ Download Clinical Report (PDF)",
+                data=ds_pdf_bytes,
+                file_name=f"{case_name}_ds_implant_report_fdi_{selected_fdi}.pdf",
+                mime="application/pdf",
+                key="ds_dl_imp_pdf",
+                use_container_width=True,
+            )
+        except Exception as e_pdf:
+            st.warning(f"PDF generator notice: {e_pdf}")
+
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Results rendering (Exact Pixel-Matched Clinical Report Dashboard)
 # ─────────────────────────────────────────────────────────────────────────────
 def render_results(result: dict):
+
     from utils.oralseg_inference import LABEL_MAP, TOOTH_FDI_MAP
     from utils.visualization import render_slice_views, extract_mesh_for_label, export_binary_stl, build_3d_interactive_figure
     from datetime import datetime
@@ -1358,8 +2222,9 @@ def render_implant_planning_section(result: dict):
     from utils.implant_report import (
         generate_implant_planning_data, save_implant_planning_json,
         generate_printable_html_report, export_virtual_implant_stl, CLINICAL_DISCLAIMER_3D,
-        plan_data_to_json_str
+        plan_data_to_json_str,
     )
+    from utils.pdf_report import generate_pdf_report as _gen_pdf
     from utils.implant_suggester_3d import (
         auto_suggest_implants_3d, seg_vol_cache_key,
         build_suggestion_summary_html, suggest_preliminary_implant_range_for_site,
@@ -1799,12 +2664,12 @@ def render_implant_planning_section(result: dict):
         output_path=stl_path,
     )
 
-    ex1, ex2, ex3 = st.columns(3)
+    ex1, ex2, ex3, ex4 = st.columns(4)
     with ex1:
         if Path(stl_path).exists():
             with open(stl_path, "rb") as f_stl:
                 st.download_button(
-                    f"⬇ Download Virtual Implant STL (FDI {selected_fdi})",
+                    f"⬇ Download STL (FDI {selected_fdi})",
                     data=f_stl.read(),
                     file_name=f"{case_name}_implant_FDI_{selected_fdi}.stl",
                     mime="application/octet-stream",
@@ -1824,13 +2689,27 @@ def render_implant_planning_section(result: dict):
 
     with ex3:
         st.download_button(
-            f"⬇ Download Printable HTML Dossier (FDI {selected_fdi})",
+            f"⬇ Download HTML Dossier (FDI {selected_fdi})",
             data=html_dossier,
             file_name=f"{case_name}_implant_dossier_FDI_{selected_fdi}.html",
             mime="text/html",
             key=f"dl_html_imp_{selected_fdi}",
             use_container_width=True,
         )
+
+    with ex4:
+        try:
+            pdf_bytes = _gen_pdf(plan_data)
+            st.download_button(
+                f"⬇ Download PDF Report (FDI {selected_fdi})",
+                data=pdf_bytes,
+                file_name=f"{case_name}_implant_report_FDI_{selected_fdi}.pdf",
+                mime="application/pdf",
+                key=f"dl_pdf_imp_{selected_fdi}",
+                use_container_width=True,
+            )
+        except Exception as _pdf_err:
+            st.warning(f"PDF generation unavailable: {_pdf_err}\n\nInstall with: pip install reportlab")
 
 
 
@@ -1861,23 +2740,108 @@ def _load_panoramic_model():
         return None, None, str(e)
 
 
+GUARDRAIL_MODEL_PATH = Path("models/xray_guardrail_simple_cnn.pth")
+
+@st.cache_resource(show_spinner=False)
+def _load_guardrail_classifier():
+    """Load the trained Simple CNN Guardrail model from models/xray_guardrail_simple_cnn.pth."""
+    import torch
+    from train_xray_guardrail import SimpleXRayCNN
+    if not GUARDRAIL_MODEL_PATH.exists():
+        return None, None
+    try:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        ckpt = torch.load(str(GUARDRAIL_MODEL_PATH), map_location=device)
+        model = SimpleXRayCNN(num_classes=2)
+        model.load_state_dict(ckpt["model_state"])
+        model.to(device).eval()
+        return model, device
+    except Exception as e:
+        logger.warning(f"Could not load AI guardrail model: {e}")
+        return None, None
+
+
+def is_valid_xray_image(img_bgr) -> tuple:
+    """
+    AI-Powered Guardrail to verify if an uploaded image is a valid dental X-ray radiograph:
+      1. Simple CNN Guardrail classifier (Trained on Normal vs Dental Xray, 100% Val Acc).
+      2. Color saturation & contrast safety check.
+    """
+    import cv2
+    import numpy as np
+    import torch
+    from PIL import Image
+    from torchvision import transforms
+
+    if img_bgr is None or img_bgr.size == 0:
+        return False, "Invalid or unreadable image file."
+
+    h, w = img_bgr.shape[:2]
+    if h < 80 or w < 80:
+        return False, f"Image resolution too low ({w}×{h} px). Minimum required is 80×80 px."
+
+    # 1. AI Guardrail Model Check (Simple CNN trained on grail_dataset)
+    model, device = _load_guardrail_classifier()
+    if model is not None:
+        try:
+            img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+            pil_img = Image.fromarray(img_rgb)
+            tf = transforms.Compose([
+                transforms.Resize((128, 128)),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+            ])
+            t_img = tf(pil_img).unsqueeze(0).to(device)
+            with torch.no_grad():
+                out = model(t_img)
+                probs = torch.softmax(out, dim=1).cpu().numpy()[0]
+                # Class 0: Normal (Non-Xray), Class 1: Xray
+                xray_prob = float(probs[1])
+                normal_prob = float(probs[0])
+                if xray_prob < 0.50:
+                    return False, f"Non-radiographic image detected (AI Confidence: {normal_prob*100:.1f}% Non-Xray). Please upload a valid dental radiograph."
+        except Exception as e:
+            logger.warning(f"AI Guardrail evaluation exception: {e}")
+
+    # 2. Color Saturation check (Radiographs are grayscale or near-grayscale)
+    if len(img_bgr.shape) == 3 and img_bgr.shape[2] == 3:
+        hsv = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV)
+        sat = hsv[:, :, 1]
+        mean_sat = float(np.mean(sat))
+        if mean_sat > 45.0:
+            return False, f"Non-radiographic photo detected (high color saturation: {mean_sat:.1f}/255). Please upload a valid grayscale dental X-ray."
+
+    # 3. Intensity & Contrast check (avoid blank or solid images)
+    gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY) if len(img_bgr.shape) == 3 else img_bgr
+    std_dev = float(np.std(gray))
+    if std_dev < 12.0:
+        return False, "Low contrast or blank image detected. Please upload a clear dental radiograph."
+
+    return True, "Valid dental radiograph"
+
+
 def run_panoramic_inference(img_bytes, threshold=0.5):
-    """Run teeth segmentation on uploaded panoramic X-ray bytes. Returns (orig_bgr, mask, overlay)."""
+    """Run teeth segmentation on uploaded panoramic X-ray bytes. Returns (orig_bgr, mask, overlay, teeth_pct_or_err)."""
     import cv2
     import numpy as np
     import torch
     import albumentations as A
     from albumentations.pytorch import ToTensorV2
 
-    model, device, err = _load_panoramic_model()
-    if err:
-        return None, None, None, err
-
     # Decode image
     file_bytes = np.frombuffer(img_bytes, np.uint8)
     img_bgr    = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
     if img_bgr is None:
         return None, None, None, "Could not decode image — please upload a valid JPG/PNG."
+
+    # Guardrail: Check if image is a valid radiograph
+    is_valid, reason = is_valid_xray_image(img_bgr)
+    if not is_valid:
+        return None, None, None, f"Guardrail Alert: {reason}"
+
+    model, device, err = _load_panoramic_model()
+    if err:
+        return None, None, None, err
 
     orig_h, orig_w = img_bgr.shape[:2]
     img_gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
@@ -1947,7 +2911,23 @@ def render_panoramic_page():
     """, unsafe_allow_html=True)
 
     # ── Upload ────────────────────────────────────────────────────────────────
-    st.markdown("### 📤 Upload Panoramic X-ray")
+    st.markdown("### 📤 Upload Panoramic X-ray (OPG)")
+
+    with st.expander("📁 Optional: Test with Benchmark OPG Samples", expanded=False):
+        c_s1, c_s2 = st.columns(2)
+        with c_s1:
+            if st.button("Load Benchmark Sample 1 (Clinical OPG)", use_container_width=True, key="btn_samp_1"):
+                with open("samples/sample_panoramic_1.jpg", "rb") as f:
+                    st.session_state["pano_raw_upload"] = f.read()
+                    st.session_state["pano_upload_name"] = "sample_panoramic_1.jpg"
+                    st.rerun()
+        with c_s2:
+            if st.button("Load Benchmark Sample 2 (Molar Region)", use_container_width=True, key="btn_samp_2"):
+                with open("samples/sample_panoramic_2.jpg", "rb") as f:
+                    st.session_state["pano_raw_upload"] = f.read()
+                    st.session_state["pano_upload_name"] = "sample_panoramic_2.jpg"
+                    st.rerun()
+
     uploaded = st.file_uploader(
         "Choose a panoramic dental X-ray image",
         type=["jpg", "jpeg", "png"],
@@ -1955,7 +2935,14 @@ def render_panoramic_page():
         help="Upload a JPG or PNG panoramic (OPG) dental X-ray image.",
     )
 
-    if uploaded is None:
+    if uploaded is not None:
+        st.session_state["pano_raw_upload"] = uploaded.getvalue()
+        st.session_state["pano_upload_name"] = uploaded.name
+
+    img_bytes = st.session_state.get("pano_raw_upload")
+    fname_used = st.session_state.get("pano_upload_name", "panoramic_xray.png")
+
+    if img_bytes is None:
         st.markdown("""
         <div class="empty-upload-card">
           <div class="empty-icon">🦷</div>
@@ -1989,109 +2976,174 @@ def render_panoramic_page():
         )
 
     # ── Run inference ─────────────────────────────────────────────────────────
-    run_btn = st.button("▶ Run Teeth Segmentation", type="primary", key="pano_run")
-    if run_btn or "pano_result" in st.session_state:
-        if run_btn:
-            with st.spinner("Running segmentation on GPU... (~2-5 seconds)"):
-                img_bytes = uploaded.read()
-                result = run_panoramic_inference(img_bytes, threshold)
-                st.session_state["pano_result"]    = result
-                st.session_state["pano_img_bytes"] = img_bytes
-                st.session_state["pano_fname"]     = uploaded.name
+    current_key = f"{fname_used}_{len(img_bytes)}_{threshold}"
+    if st.session_state.get("pano_last_key") != current_key:
+        with st.spinner("Running U-Net++ segmentation on GPU... (~1-2 seconds)"):
+            result = run_panoramic_inference(img_bytes, threshold)
+            st.session_state["pano_result"]    = result
+            st.session_state["pano_img_bytes"] = img_bytes
+            st.session_state["pano_fname"]     = fname_used
+            st.session_state["pano_last_key"]  = current_key
 
-        result = st.session_state.get("pano_result")
-        if result is None:
-            return
+    run_btn = st.button("▶ Re-run Teeth Segmentation", type="primary", key="pano_run")
+    if run_btn:
+        with st.spinner("Running U-Net++ segmentation on GPU... (~1-2 seconds)"):
+            result = run_panoramic_inference(img_bytes, threshold)
+            st.session_state["pano_result"]    = result
+            st.session_state["pano_img_bytes"] = img_bytes
+            st.session_state["pano_fname"]     = fname_used
+            st.session_state["pano_last_key"]  = current_key
 
-        img_bgr, pred_mask, overlay, teeth_pct_or_err = result
+    result = st.session_state.get("pano_result")
+    if result is None:
+        st.info("Upload an image above to begin segmentation.")
+        return
 
-        if img_bgr is None:
-            st.error(f"❌ Inference failed: {teeth_pct_or_err}")
-            return
+    img_bgr, pred_mask, overlay, teeth_pct_or_err = result
 
-        teeth_pct = teeth_pct_or_err
+    if img_bgr is None:
+        st.error(f"❌ Inference failed: {teeth_pct_or_err}")
+        return
 
-        # ── Stats row ─────────────────────────────────────────────────────────
-        st.markdown("---")
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Image Size", f"{img_bgr.shape[1]} × {img_bgr.shape[0]} px")
-        c2.metric("Teeth Coverage", f"{teeth_pct:.1f}%")
-        c3.metric("Threshold Used", f"{threshold:.2f}")
-        c4.metric("Model Val Dice", "0.90")
+    teeth_pct = teeth_pct_or_err
 
-        # ── Side-by-side display ───────────────────────────────────────────────
-        st.markdown("### 🔬 Segmentation Results")
-        col1, col2, col3 = st.columns(3)
+    # ── Stats row ─────────────────────────────────────────────────────────
+    st.markdown("---")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Image Size", f"{img_bgr.shape[1]} × {img_bgr.shape[0]} px")
+    c2.metric("Teeth Coverage", f"{teeth_pct:.1f}%")
+    c3.metric("Threshold Used", f"{threshold:.2f}")
+    c4.metric("Model Val Dice", "0.90")
 
-        # Convert BGR → RGB for display
-        img_rgb     = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
-        overlay_rgb = cv2.cvtColor(overlay,  cv2.COLOR_BGR2RGB)
+    # ── Side-by-side display ───────────────────────────────────────────────
+    st.markdown("### 🔬 Segmentation Results")
+    col1, col2, col3 = st.columns(3)
 
-        with col1:
-            st.markdown("**Original X-ray**")
-            st.image(img_rgb, use_container_width=True)
+    # Convert BGR → RGB for display
+    img_rgb     = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+    overlay_rgb = cv2.cvtColor(overlay,  cv2.COLOR_BGR2RGB)
 
-        with col2:
-            st.markdown("**Teeth Mask** (white = teeth)")
-            st.image(pred_mask, use_container_width=True, clamp=True)
+    with col1:
+        st.markdown("**Original X-ray**")
+        st.image(img_rgb, use_container_width=True)
 
-        with col3:
-            st.markdown("**Overlay** (green = teeth)")
-            st.image(overlay_rgb, use_container_width=True)
+    with col2:
+        st.markdown("**Teeth Mask** (white = teeth)")
+        st.image(pred_mask, use_container_width=True, clamp=True)
 
-        # ── Download buttons ─────────────────────────────────────────────────
-        st.markdown("### ⬇ Download Results")
-        stem = Path(st.session_state.get("pano_fname", "result")).stem
+    with col3:
+        st.markdown("**Overlay** (green = teeth)")
+        st.image(overlay_rgb, use_container_width=True)
 
-        _, mask_enc = cv2.imencode(".png", pred_mask)
-        _, overlay_enc = cv2.imencode(".png", overlay)
+    # ── Download buttons ─────────────────────────────────────────────────
+    st.markdown("### ⬇ Download Results")
+    stem = Path(fname_used).stem
 
-        dl1, dl2 = st.columns(2)
-        with dl1:
+    _, mask_enc = cv2.imencode(".png", pred_mask)
+    _, overlay_enc = cv2.imencode(".png", overlay)
+
+    dl1, dl2, dl3 = st.columns(3)
+    with dl1:
+        st.download_button(
+            label="⬇ Download Mask (PNG)",
+            data=mask_enc.tobytes(),
+            file_name=f"{stem}_teeth_mask.png",
+            mime="image/png",
+            key="dl_mask",
+            use_container_width=True,
+        )
+    with dl2:
+        st.download_button(
+            label="⬇ Download Overlay (PNG)",
+            data=overlay_enc.tobytes(),
+            file_name=f"{stem}_teeth_overlay.png",
+            mime="image/png",
+            key="dl_overlay",
+            use_container_width=True,
+        )
+    with dl3:
+        try:
+            from utils.pdf_report import generate_2d_seg_pdf_report
+            import numpy as np
+            num_labels, _ = cv2.connectedComponents((pred_mask > 0).astype(np.uint8))
+            teeth_px = int(np.count_nonzero(pred_mask))
+            total_px = int(pred_mask.size)
+            teeth_pct = (teeth_px / max(1, total_px)) * 100.0
+
+            seg_payload = {
+                "image_file": str(fname_used),
+                "image_shape": pred_mask.shape,
+                "confidence_threshold": float(threshold),
+                "teeth_area_px": teeth_px,
+                "teeth_area_pct": teeth_pct,
+                "num_components": max(0, num_labels - 1),
+                "model_name": "DeepLabV3+ (ResNet-50 Backbone, PyTorch Native)",
+                "overlay_image_png": overlay_enc.tobytes(),
+            }
+            seg_pdf_bytes = generate_2d_seg_pdf_report(seg_payload)
             st.download_button(
-                label="⬇ Download Mask (PNG)",
-                data=mask_enc.tobytes(),
-                file_name=f"{stem}_teeth_mask.png",
-                mime="image/png",
-                key="dl_mask",
+                label="⬇ Download Summary Report (PDF)",
+                data=seg_pdf_bytes,
+                file_name=f"{stem}_teeth_segmentation_report.pdf",
+                mime="application/pdf",
+                key="dl_seg_pdf",
+                use_container_width=True,
             )
-        with dl2:
-            st.download_button(
-                label="⬇ Download Overlay (PNG)",
-                data=overlay_enc.tobytes(),
-                file_name=f"{stem}_teeth_overlay.png",
-                mime="image/png",
-                key="dl_overlay",
-            )
+        except Exception as e_pdf:
+            st.warning(f"PDF generator notice: {e_pdf}")
 
-        # ── Launch Planner Button ─────────────────────────────────────────────
-        st.markdown("---")
-        st.markdown("""
-        <div style="background:linear-gradient(135deg,#0F3B7A 0%,#1E40AF 100%);border-radius:10px;
-                    padding:1rem 1.4rem;margin-bottom:1.2rem;">
-          <h3 style="color:#FFFFFF;margin:0 0 4px 0;font-size:1.05rem;">🎯 2D Dental Implant Planning Workstation</h3>
-          <p style="color:#BFDBFE;font-size:0.82rem;margin:0;">
-            Use this high-accuracy teeth segmentation to detect individual tooth bounding boxes,
-            anatomical FDI numbers, edentulous missing gaps, and preliminary virtual implant overlays.
-          </p>
-        </div>
-        """, unsafe_allow_html=True)
+    # ── Launch Planner Button ─────────────────────────────────────────────
+    st.markdown("---")
+    st.markdown("""
+    <div style="background:linear-gradient(135deg,#0F3B7A 0%,#1E40AF 100%);border-radius:10px;
+                padding:1rem 1.4rem;margin-bottom:1.2rem;">
+      <h3 style="color:#FFFFFF;margin:0 0 4px 0;font-size:1.05rem;">🎯 2D Dental Implant Planning Workstation</h3>
+      <p style="color:#BFDBFE;font-size:0.82rem;margin:0;">
+        Use this high-accuracy teeth segmentation to detect individual tooth bounding boxes,
+        anatomical FDI numbers, edentulous missing gaps, and preliminary virtual implant overlays.
+      </p>
+    </div>
+    """, unsafe_allow_html=True)
 
-        col_plan_btn, col_plan_txt = st.columns([1, 2])
-        with col_plan_btn:
-            if st.button("🚀 Launch 2D Implant Planning Workstation", type="primary", key="btn_open_planner", use_container_width=True):
-                from utils.panoramic_planner import run_full_planning
-                with st.spinner("Analyzing tooth instances, FDI numbers & edentulous spaces..."):
-                    pl_res = run_full_planning(img_bgr, pred_mask, opg_width_mm=150.0, min_gap_mm=4.5)
-                    st.session_state["planner_result"] = pl_res
-                    st.session_state["planner_raw"] = (img_bgr, pred_mask, f"{stem}.png")
-                st.success("✅ Tooth analysis & implant plans generated! Switch to the **🎯 2D Implant Planner** tab above to interact with your plan.")
-        with col_plan_txt:
-            st.markdown(
-                "<div style='font-size:12px;color:var(--text-secondary);padding-top:6px;'>"
-                "<b>Next Step:</b> Switch to the <b>🎯 2D Implant Planner</b> tab at the top of the screen to view all individual tooth bounding boxes, 32-tooth status table, and candidate virtual implant overlays."
-                "</div>", unsafe_allow_html=True
-            )
+    col_plan_btn, col_plan_txt = st.columns([1, 2])
+    with col_plan_btn:
+        if st.button("🚀 Launch 2D Implant Planning Workstation", type="primary", key="btn_open_planner", use_container_width=True):
+            from utils.panoramic_planner import run_full_planning
+            with st.spinner("Analyzing tooth instances, FDI numbers & edentulous spaces..."):
+                pl_res = run_full_planning(img_bgr, pred_mask, opg_width_mm=150.0, min_gap_mm=4.5)
+                st.session_state["planner_result"] = pl_res
+                st.session_state["planner_raw"] = (img_bgr, pred_mask, f"{stem}.png")
+                for plan in pl_res.implant_plans:
+                    fdi = plan.site_fdi
+                    st.session_state[f"pl_diam_{fdi}"] = plan.diameter_mm
+                    st.session_state[f"pl_len_{fdi}"]  = plan.length_mm
+                    st.session_state[f"pl_ang_{fdi}"]  = plan.angulation_deg
+                    st.session_state[f"pl_xoff_{fdi}"] = 0.0
+                    st.session_state[f"pl_yoff_{fdi}"] = 0.0
+                st.session_state["trigger_switch_to_planner"] = True
+    with col_plan_txt:
+        st.markdown(
+            "<div style='font-size:12px;color:var(--text-secondary);padding-top:6px;'>"
+            "<b>Next Step:</b> Automatically switches to the <b>🎯 2D Implant Planner</b> workstation to view tooth bounding boxes, 32-tooth status table, and candidate virtual implant overlays."
+            "</div>", unsafe_allow_html=True
+        )
+
+    if st.session_state.get("trigger_switch_to_planner"):
+        st.session_state["trigger_switch_to_planner"] = False
+        st.components.v1.html(
+            """
+            <script>
+                setTimeout(function() {
+                    const tabs = window.parent.document.querySelectorAll('button[data-baseweb="tab"]');
+                    if (tabs && tabs.length >= 3) {
+                        tabs[2].click();
+                    }
+                }, 50);
+            </script>
+            """,
+            height=0,
+            width=0,
+        )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2165,14 +3217,29 @@ def render_2d_planner_page():
     </div>
     """, unsafe_allow_html=True)
 
+    with st.expander("📁 Optional: Test with Benchmark OPG Samples", expanded=False):
+        c_p1, c_p2 = st.columns(2)
+        with c_p1:
+            if st.button("Load Benchmark Sample 1 (Clinical OPG)", use_container_width=True, key="btn_pl_samp_1"):
+                with open("samples/sample_panoramic_1.jpg", "rb") as f:
+                    st.session_state["planner_raw_upload"] = f.read()
+                    st.session_state["planner_upload_name"] = "sample_panoramic_1.jpg"
+                    st.rerun()
+        with c_p2:
+            if st.button("Load Benchmark Sample 2 (Molar Region)", use_container_width=True, key="btn_pl_samp_2"):
+                with open("samples/sample_panoramic_2.jpg", "rb") as f:
+                    st.session_state["planner_raw_upload"] = f.read()
+                    st.session_state["planner_upload_name"] = "sample_panoramic_2.jpg"
+                    st.rerun()
+
     has_session_pano = ("pano_result" in st.session_state and st.session_state["pano_result"] is not None)
     if has_session_pano:
         pano_fname = st.session_state.get("pano_fname", "Current X-ray")
         st.markdown(
             f"<div style='background:#EFF6FF;border:1px solid #BFDBFE;border-radius:8px;"
             f"padding:8px 12px;margin-bottom:10px;font-size:12px;color:#1E40AF;'>"
-            f"⚡ <b>Active segmentation detected:</b> <code>{pano_fname}</code>. "
-            f"Click <b>▶ Run Analysis</b> to process this image, or upload a new one below."
+            f"⚡ <b>Active segmentation detected from Tab 2:</b> <code>{pano_fname}</code>. "
+            f"Click <b>▶ Run Analysis</b> below to process this image, or upload a new one below."
             f"</div>",
             unsafe_allow_html=True,
         )
@@ -2184,7 +3251,14 @@ def render_2d_planner_page():
         help="JPG or PNG panoramic (OPG) dental X-ray.",
     )
 
-    if uploaded is None and not has_session_pano:
+    if uploaded is not None:
+        st.session_state["planner_raw_upload"] = uploaded.getvalue()
+        st.session_state["planner_upload_name"] = uploaded.name
+
+    p_bytes = st.session_state.get("planner_raw_upload")
+    p_name = st.session_state.get("planner_upload_name", "panoramic_xray.png")
+
+    if p_bytes is None and not has_session_pano:
         st.markdown("""
         <div class="empty-upload-card">
           <div class="empty-icon">🦷</div>
@@ -2213,19 +3287,20 @@ def render_2d_planner_page():
         pl_min_gap = st.slider("Min Gap (mm)", 3.0, 10.0, 4.5, 0.5, key="pl_min_gap")
     with c_btn:
         st.markdown("<div style='padding-top:22px;'></div>", unsafe_allow_html=True)
-        pl_run_btn = st.button("▶ Run Analysis", type="primary", key="pl_run", use_container_width=True)
+        pl_run_btn = st.button("▶ Re-run Analysis", type="primary", key="pl_run", use_container_width=True)
 
     # ── Run segmentation + planning ──────────────────────────────────
     pl_key = "planner_result"
     pl_raw_key = "planner_raw"
+    current_pl_key = f"{p_name}_{len(p_bytes) if p_bytes else 'session'}_{pl_thresh}_{pl_opg_mm}_{pl_min_gap}"
 
-    if pl_run_btn:
-        if uploaded is not None:
-            img_bytes = uploaded.read()
+    if pl_run_btn or st.session_state.get("pl_last_key") != current_pl_key:
+        if p_bytes is not None:
+            img_bytes = p_bytes
+            fname_used = p_name
             with st.spinner("🔍 Segmenting teeth in panoramic image..."):
                 raw = run_panoramic_inference(img_bytes, pl_thresh)
             img_bgr, pred_mask, _, _ = raw
-            fname_used = uploaded.name
         else:
             img_bgr, pred_mask, _, _ = st.session_state["pano_result"]
             fname_used = st.session_state.get("pano_fname", "panoramic_xray.png")
@@ -2241,8 +3316,9 @@ def render_2d_planner_page():
                 is_calibrated=pl_calibrated,
                 min_gap_mm=pl_min_gap,
             )
-        st.session_state[pl_key]     = pl_result
+        st.session_state[pl_key] = pl_result
         st.session_state[pl_raw_key] = (img_bgr, pred_mask, fname_used)
+        st.session_state["pl_last_key"] = current_pl_key
         for plan in pl_result.implant_plans:
             fdi = plan.site_fdi
             if f"pl_diam_{fdi}" not in st.session_state:
@@ -3024,23 +4100,56 @@ def render_2d_planner_page():
             return bool(obj)
         return str(obj)
 
-    ex1, ex2, ex3 = st.columns(3)
+    # ── Render high-resolution annotated planning image for both PNG and PDF export ─
+    with st.spinner("Rendering high-resolution implant planning visual..."):
+        fig_exp = render_planning_figure(
+            pl_result, img_bgr,
+            show_teeth_boxes=True, show_missing_boxes=True,
+            show_measurements=True, show_landmarks=True, show_implants=True,
+            user_params=user_params, figsize=(24, 10),
+        )
+        buf_fig = _io.BytesIO()
+        fig_exp.savefig(buf_fig, format="png", dpi=180, bbox_inches="tight", facecolor="#0d1117")
+        annotated_png_bytes = buf_fig.getvalue()
+        plt.close(fig_exp)
+
+    pano_report_payload = {
+        "image_file":        str(fname),
+        "opg_width_mm":      float(pl_opg_mm),
+        "is_calibrated":     bool(pl_calibrated),
+        "px_per_mm":         round(float(pl_result.px_per_mm), 4),
+        "selected_site_fdi": int(fdi),
+        "annotated_image_png": annotated_png_bytes,
+        "tooth_status_table": [
+            {
+                "fdi": int(e.fdi),
+                "arch_region": str(e.arch_region),
+                "detected": bool(e.detected),
+                "status": str(e.status),
+                "confidence": float(e.confidence),
+                "available_space_mm": getattr(e, "available_space_mm", None),
+                "implant_consideration": getattr(e, "implant_consideration", ""),
+                "bbox": [int(x) for x in e.bbox] if e.bbox else None,
+                "reason": str(e.reason),
+            }
+            for e in pl_result.tooth_status_table
+        ],
+        "implant_plans":  plans_to_dict_list(export_plans),
+        "planning_status": "PRELIMINARY — DENTIST REVIEW REQUIRED",
+        "disclaimer": (
+            "CBCT REQUIRED FOR FINAL IMPLANT PLANNING: "
+            "These results are intended only as AI-assisted preliminary decision support from a 2D panoramic radiograph. "
+            "Final implant selection, positioning, and surgical planning must be performed by a qualified dental professional "
+            "using appropriate clinical examination and 3D imaging such as CBCT."
+        ),
+    }
+
+    ex1, ex2, ex3, ex4 = st.columns(4)
 
     with ex1:
-        with st.spinner("Rendering export figure..."):
-            fig_exp = render_planning_figure(
-                pl_result, img_bgr,
-                show_teeth_boxes=True, show_missing_boxes=True,
-                show_measurements=True, show_landmarks=True, show_implants=True,
-                user_params=user_params, figsize=(24, 10),
-            )
-            buf = _io.BytesIO()
-            fig_exp.savefig(buf, format="png", dpi=180, bbox_inches="tight", facecolor="#0d1117")
-            buf.seek(0)
-            plt.close(fig_exp)
         st.download_button(
-            "⬇ Download Annotated Image (PNG)",
-            data=buf.getvalue(),
+            "⬇ Annotated Image (PNG)",
+            data=annotated_png_bytes,
             file_name=f"{stem}_implant_plan.png",
             mime="image/png",
             key="pl_dl_img",
@@ -3049,38 +4158,12 @@ def render_2d_planner_page():
 
     with ex2:
         plan_json = json.dumps(
-            {
-                "image_file":        str(fname),
-                "opg_width_mm":      float(pl_opg_mm),
-                "is_calibrated":     bool(pl_calibrated),
-                "px_per_mm":         round(float(pl_result.px_per_mm), 4),
-                "selected_site_fdi": int(fdi),
-                "tooth_status_table": [
-                    {
-                        "fdi": int(e.fdi),
-                        "arch_region": str(e.arch_region),
-                        "detected": bool(e.detected),
-                        "status": str(e.status),
-                        "confidence": float(e.confidence),
-                        "bbox": [int(x) for x in e.bbox] if e.bbox else None,
-                        "reason": str(e.reason),
-                    }
-                    for e in pl_result.tooth_status_table
-                ],
-                "implant_plans":  plans_to_dict_list(export_plans),
-                "planning_status": "PRELIMINARY — DENTIST REVIEW REQUIRED",
-                "disclaimer": (
-                    "CBCT REQUIRED FOR FINAL IMPLANT PLANNING: "
-                    "These results are intended only as AI-assisted preliminary decision support from a 2D panoramic radiograph. "
-                    "Final implant selection, positioning, and surgical planning must be performed by a qualified dental professional "
-                    "using appropriate clinical examination and 3D imaging such as CBCT."
-                ),
-            },
+            pano_report_payload,
             indent=2,
             default=_json_default,
         )
         st.download_button(
-            "⬇ Download Planning Report (JSON)",
+            "⬇ Planning Dossier (JSON)",
             data=plan_json,
             file_name=f"{stem}_implant_report.json",
             mime="application/json",
@@ -3099,13 +4182,28 @@ def render_2d_planner_page():
             for plan in export_plans:
                 full_text_report += generate_site_report(plan, pl_result)
             st.download_button(
-                "⬇ Download Text Report (TXT)",
+                "⬇ Text Summary (TXT)",
                 data=full_text_report,
                 file_name=f"{stem}_implant_report.txt",
                 mime="text/plain",
                 key="pl_dl_txt",
                 use_container_width=True,
             )
+
+    with ex4:
+        try:
+            from utils.pdf_report import generate_panoramic_pdf_report
+            pano_pdf_bytes = generate_panoramic_pdf_report(pano_report_payload)
+            st.download_button(
+                "⬇ Clinical Report (PDF)",
+                data=pano_pdf_bytes,
+                file_name=f"{stem}_panoramic_implant_report.pdf",
+                mime="application/pdf",
+                key="pl_dl_pdf",
+                use_container_width=True,
+            )
+        except Exception as e_pdf:
+            st.warning(f"PDF generator notice: {e_pdf}")
 
     # ── Advanced: 32-tooth status full data table ────────────────────────────
     with st.expander("📋 Detailed 32-Tooth Numerical Data Table (Advanced)", expanded=False):
@@ -3162,73 +4260,110 @@ def main():
         "🎯  2D Implant Planner",
     ])
 
+    # Auto-load precomputed case (K01) if no active result in session state
+    if "last_result" not in st.session_state or st.session_state["last_result"] is None:
+        precomputed = load_precomputed_case("K01")
+        if precomputed is not None:
+            st.session_state["last_result"] = precomputed
+
     with tab_cbct:
-        # Check model exists before doing anything
-        if not CHECKPOINT_PATH.exists():
+        # ── DentalSegmentator Engine Banner ───────────────────────────────────
+        ds_badge = "✅ Ready" if DENTAL_SEG_CHECKPOINT.exists() else "❌ Not found"
+        st.markdown(f"""
+        <div style="background:#FFFFFF;border:1px solid #CBD5E1;border-radius:10px;
+                    padding:14px 18px;margin-bottom:16px;box-shadow:0 1px 4px rgba(15,23,42,0.04);">
+          <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;">
+            <div style="display:flex;align-items:center;gap:10px;">
+              <div style="font-size:24px;">🦷</div>
+              <div>
+                <div style="font-size:14px;font-weight:800;color:#0F3B7A;">DentalSegmentator 3D CBCT Engine</div>
+                <div style="font-size:11.5px;color:#64748B;margin-top:1px;">
+                  nnU-Net 3D Full Resolution &middot; Dataset 112 &middot; Fold 0 &middot; 5 Anatomical Classes &middot; Local Inference
+                </div>
+              </div>
+            </div>
+            <span style="background:{'#ECFDF5' if DENTAL_SEG_CHECKPOINT.exists() else '#FEF2F2'};
+                         border:1px solid {'#A7F3D0' if DENTAL_SEG_CHECKPOINT.exists() else '#FECACA'};
+                         border-radius:6px;padding:4px 12px;font-size:11px;font-weight:700;
+                         color:{'#047857' if DENTAL_SEG_CHECKPOINT.exists() else '#DC2626'};">
+              {ds_badge}
+            </span>
+          </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        if not DENTAL_SEG_CHECKPOINT.exists():
             st.error(
-                f"⛔ **OralSeg model checkpoint not found.**\n\n"
-                f"Expected: `models/model_workstation39.pt`\n\n"
-                f"Please place your checkpoint file at:\n```\n{CHECKPOINT_PATH}\n```"
+                f"⛔ **DentalSegmentator checkpoint not found.**\n\n"
+                f"Expected:\n```\n{DENTAL_SEG_CHECKPOINT}\n```\n\n"
+                "Set the `DENTALSEGMENTATOR_MODEL_DIR` environment variable to override."
             )
         else:
-            # ── Upload section ───────────────────────────────────────────────
-            uploaded_file = render_upload_section()
+            has_active_result = (st.session_state.get("last_result") is not None)
 
-            if uploaded_file is None:
-                st.markdown("""
-                <div class="empty-upload-card">
-                  <div class="empty-icon">🦷</div>
-                  <div class="empty-title">
-                    Upload CBCT Dataset (DICOM ZIP or NIfTI)
+            with st.expander("📁 Upload New CBCT Dataset (DICOM ZIP or NIfTI)", expanded=not has_active_result):
+                uploaded_file = render_upload_section()
+
+                if uploaded_file is not None:
+                    upload_state = process_upload(uploaded_file)
+                    if upload_state is not None:
+                        st.markdown("---")
+                        st.markdown("### 🚀 Run Segmentation & Volumetric Analysis")
+
+                        dev_info = get_device_info()
+                        device_label = dev_info["gpu_name"] if dev_info["cuda"] else "CPU"
+                        st.markdown(f"""
+                        <div style="background:#F8FAFC;border:1px solid #E2E8F0;border-radius:8px;
+                                    padding:10px 14px;margin-bottom:12px;font-size:12.5px;">
+                          <b>Model:</b> DentalSegmentator &nbsp;|&nbsp;
+                          <b>Architecture:</b> nnU-Net 3D Full Res &nbsp;|&nbsp;
+                          <b>Dataset:</b> 112 &nbsp;|&nbsp; <b>Fold:</b> 0 &nbsp;|&nbsp;
+                          <b>Device:</b> {"🟢 CUDA — " + device_label if dev_info["cuda"] else "🟡 CPU (very slow)"}
+                        </div>
+                        """, unsafe_allow_html=True)
+                        if not dev_info["cuda"]:
+                            st.warning(
+                                "⚠️ **CUDA not available.** DentalSegmentator on CPU can take "
+                                "30–90 minutes. GPU is strongly recommended."
+                            )
+                        col_btn, col_info = st.columns([1, 3])
+                        with col_btn:
+                            run_btn = st.button("▶ Run DentalSegmentator", type="primary", key="run_seg_dentalseg")
+                        with col_info:
+                            st.markdown(
+                                "<p style='color:var(--text-secondary);font-size:0.85rem;padding-top:0.6rem;'>"
+                                "Segments <b>Upper Skull</b>, <b>Mandible</b>, <b>Upper Teeth</b>, <b>Lower Teeth</b>, and <b>Mandibular Canal</b>, "
+                                "and computes full physical volumetrics & bone density.</p>",
+                                unsafe_allow_html=True,
+                            )
+                        if run_btn:
+                            result = run_pipeline(upload_state, overlap=0.5, model_choice="dentalseg")
+                            if result is not None:
+                                st.session_state["last_result"]  = result
+                                st.session_state["upload_state"] = upload_state
+                                st.rerun()
+
+            if "last_result" in st.session_state and st.session_state["last_result"] is not None:
+                last = st.session_state["last_result"]
+                case_id = last.get("case_name", "Unknown Case")
+
+                st.markdown(f"""
+                <div style="background:#F0FDF4;border:1px solid #BBF7D0;border-radius:8px;
+                            padding:10px 16px;margin-bottom:14px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;">
+                  <div style="font-size:13px;color:#166534;font-weight:700;display:flex;align-items:center;gap:6px;">
+                    <span>🟢</span> Active Patient Dataset: <b>{case_id}</b>
                   </div>
-                  <p class="empty-sub">
-                    Drag and drop a <code>.zip</code> (CBCT DICOM slices) or <code>.nii</code> / <code>.nii.gz</code> (3D NIfTI volume) to initiate anatomical segmentation.
-                  </p>
-                  <div style="margin-top:14px;display:flex;justify-content:center;gap:16px;font-size:11px;color:var(--text-muted);">
-                    <span>✓ 35-Class Anatomy Engine</span>
-                    <span>✓ Direct NIfTI Support</span>
-                    <span>✓ High-Resolution 3D Meshes</span>
-                    <span>✓ Safety Canal Measurement</span>
+                  <div style="font-size:11.5px;color:#15803D;font-weight:600;">
+                    ✓ 3D Volumetrics &nbsp;&bull;&nbsp; ✓ Misch HU Bone Density &nbsp;&bull;&nbsp; ✓ 3D CBCT Implant Workstation Ready
                   </div>
                 </div>
                 """, unsafe_allow_html=True)
-            else:
-                # ── Process upload ───────────────────────────────────────────
-                upload_state = process_upload(uploaded_file)
-                if upload_state is not None:
-                    # ── Run segmentation ─────────────────────────────────────
-                    st.markdown("---")
-                    st.markdown("### 🚀 Run Segmentation")
 
-                    col_mode, col_info_mode = st.columns([1, 2])
-                    with col_mode:
-                        speed_mode = st.radio(
-                            "Inference Mode",
-                            ["⚡ Fast Mode (overlap=0.25, ~1-2 min)", "🎯 High Precision (overlap=0.50, ~4-6 min)"],
-                            index=0,
-                            help="Fast Mode uses less patch overlap for much faster processing on laptop GPUs.",
-                        )
-                        overlap_val = 0.25 if "Fast" in speed_mode else 0.50
+                if last.get("seg_model") == "dentalseg":
+                    render_ds_results(last)
+                else:
+                    render_results(last)
 
-                    col_btn, col_info = st.columns([1, 3])
-                    with col_btn:
-                        run_btn = st.button("▶ Run OralSeg Segmentation", type="primary", key="run_seg")
-                    with col_info:
-                        st.markdown(
-                            f"<p style='color:var(--text-secondary);font-size:0.85rem;padding-top:0.6rem;font-weight:500;'>"
-                            f"Using <b>{'Fast Mode (~1-2 min)' if overlap_val == 0.25 else 'High Precision Mode (~4-6 min)'}</b> on GPU.</p>",
-                            unsafe_allow_html=True,
-                        )
-
-                    if run_btn:
-                        result = run_pipeline(upload_state, overlap=overlap_val)
-                        if result is not None:
-                            st.session_state["last_result"]  = result
-                            st.session_state["upload_state"] = upload_state
-
-                    # ── Show results if available ────────────────────────────
-                    if "last_result" in st.session_state and st.session_state["last_result"] is not None:
-                        render_results(st.session_state["last_result"])
 
     with tab_pano:
         render_panoramic_page()

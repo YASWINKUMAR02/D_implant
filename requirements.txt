@@ -40,6 +40,10 @@ einops==0.8.1
 tensorboardX>=2.6.0
 tqdm>=4.66.0
 
+# ── PDF Report Generation ──────────────────────────────────────────────────────
+reportlab>=4.0.0
+
+
 # ── Optional (for 3D rendering) ───────────────────────────────────────────────
 # vtk>=9.3.0
 # pyvista>=0.43.0
